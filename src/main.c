@@ -23,19 +23,13 @@
 #include "ext/sokol_debugtext.h"
 //-------------------
 
-#define WINDOW_WIDTH 640
-#define WINDOW_HEIGHT 480
+#define WINDOW_WIDTH 800
+#define WINDOW_HEIGHT 600
 
 #define CHAR_PIXELS 8
+#define CURSOR_CHAR 0x7c
 
 #define SHELL "/bin/sh"
-
-typedef enum {
-    FONT_ORIC,
-    FONT_KC854,
-    FONT_Z1013,
-    FONT_COUNT,
-} JTermFont;
 
 typedef struct {
     int master, slave;
@@ -43,24 +37,25 @@ typedef struct {
 
 typedef struct {
     uint w, h;
-} JtermSize;
+} JTermSize;
 
 typedef struct {
     uint x, y;
-} JtermPos;
+} JTermPos;
 
 typedef struct {
     sg_pass_action pass_action;
-    JtermPos pos;
-    JtermSize size;
-    float scale;
+    uint font;
 
     PTY pty;
-    bool just_wrapped;
     char *buffer;
-} JtermState;
+    JTermPos pos;
+    JTermSize size;
+    float scale;
+    bool just_wrapped;
+} JTermState;
 
-JtermState state;
+JTermState state;
 
 sg_color sg_make_color_4b(uchar r, uchar g, uchar b, uchar a) {
     sg_color result;
@@ -81,7 +76,6 @@ void pt_pair(PTY *pty)
     if (pty->master == -1) {
         ERROR("posix_openpt");
     }
-
     /* grantpt() and unlockpt() are housekeeping functions that have to
      * be called before we can open the slave FD. Refer to the manpages
      * on what they do. */
@@ -132,7 +126,7 @@ void term_set_size()
 void spawn_shell(PTY *pty)
 {
     pid_t pid;
-    char *env[] = { "TERM=dumb", NULL };
+    char *env[] = { "TERM=dumb", "DISPLAY=:1", NULL };
 
     pid = fork();
     if (pid == 0) {
@@ -170,12 +164,12 @@ static void init()
                 .clear_value = sg_make_color_4b(0x18, 0x18, 0x18, 0xFF),
             },
         };
-    state.scale = 1.25f;
-    state.size = (JtermSize){
+    state.scale = 1.75f;
+    state.size = (JTermSize){
         .w = sapp_width()/(CHAR_PIXELS*state.scale),
         .h = sapp_height()/(CHAR_PIXELS*state.scale),
     };
-    state.pos  = (JtermPos){ 0, 0 };
+    state.pos  = (JTermPos){ 0, 0 };
     state.buffer = calloc(state.size.h*state.size.w + 1, sizeof(char));
 
     pt_pair(&state.pty);
@@ -190,17 +184,18 @@ static void init()
 
     sdtx_setup(&(sdtx_desc_t){
         .fonts = {
-            [FONT_ORIC]  = sdtx_font_oric(),
-            [FONT_KC854] = sdtx_font_kc854(),
-            [FONT_Z1013] = sdtx_font_z1013(),
+            sdtx_font_cpc(),
+            sdtx_font_oric(),
         },
         .logger.func = slog_func,
     });
 
-    sdtx_font(FONT_ORIC);
+    state.font = 0;
+
 }
 
-#define POLL_TIMEOUT_US 10000
+#define POLL_TIMEOUT_MS 10
+#define POLL_TIMEOUT_US (POLL_TIMEOUT_MS*1000)
 #define BUF_SIZE 256
 void read_pty()
 {
@@ -229,44 +224,49 @@ void read_pty()
     }
 
     for (int i = 0; i < n; i++) {
-        if (buf[i] == '\r') {
-            state.pos.x = 0;
-        } else {
-            if (buf[i] != '\n') {
+        switch (buf[i]) {
+            case '\r':
+                state.pos.x = 0;
+            break;
+            case '\n':
+                if (!state.just_wrapped) {
+                    /* We read a newline and if we did *not* implicitly
+                     * wrap to the next line */
+                    state.pos.y++;
+                    state.just_wrapped = false;
+                }
+            break;
+            case '\b':
+            case 0x7F:
+                state.pos.x--;
+                state.buffer[state.pos.y*state.size.w + state.pos.x] = '\0';
+            break;
+            default:
                 /* If this is a regular byte, store it and advance
-                 * the cursor one cell "to the right". This might
-                 * actually wrap to the next line, see below. */
+                 * the cursor one cell to the right. */
                 state.buffer[state.pos.y*state.size.w + state.pos.x] = buf[i];
                 state.pos.x++;
-
                 if (state.pos.x >= state.size.w) {
                     state.pos.x = 0;
                     state.pos.y++;
                     state.just_wrapped = true;
                 } else state.just_wrapped = false;
+        }
+        // Shift the entire content one line up and then stay in the very last line.
+        if (state.pos.y >= state.size.h) {
+            memmove(state.buffer, &state.buffer[state.size.w],
+                    state.size.w*(state.size.h - 1));
 
-            } else if (!state.just_wrapped) {
-                /* We read a newline and if we did *not* implicitly
-                 * wrap to the next line with the last byte we read.
-                 * This means we must *now* advance to the next
-                 * line.
-                 */
-                state.pos.y++;
-                state.just_wrapped = false;
-            }
-
-            // Shift the entire content one line up and then stay in the very last line.
-            if (state.pos.y >= state.size.h) {
-                memmove(state.buffer, &state.buffer[state.size.w],
-                        state.size.w*(state.size.h - 1));
-
-                state.pos.y = state.size.h - 1;
-                for (int i = 0; i < state.size.w; i++)
-                    state.buffer[state.pos.y*state.size.w + i] = 0;
-            }
+            state.pos.y = state.size.h - 1;
+            for (int i = 0; i < state.size.w; i++)
+                state.buffer[state.pos.y*state.size.w + i] = 0;
         }
     }
 
+}
+
+void handle_esc_sequence(uint index)
+{
 }
 
 static void frame()
@@ -282,11 +282,25 @@ static void frame()
     // all movement is relative to this origin and is all in character units
     sdtx_origin(0, 0);
     sdtx_color3b(0xFF, 0xFF, 0xFF);
-    for (int i = 0; i <= state.pos.y; i++) {
-        sdtx_putr(&state.buffer[i*state.size.w], state.size.w);
-        sdtx_crlf();
-        sdtx_crlf();
+    sdtx_font(state.font);
+
+    // render the buffer character by character to handle escape sequences
+    for (int row = 0; row <= state.pos.y; row++) {
+        for (int col = 0; col < state.size.w; col++) {
+            char c = state.buffer[row*state.size.w + col];
+            if (!c) break;
+            // When we find esc the upcoming sequence must be handled
+            uint index = row*state.size.w + col;
+            if (c == '\x1b') handle_esc_sequence(index + 1);
+            sdtx_putc(c);
+        }
+        if (row < state.pos.y) {
+            sdtx_crlf();
+        }
     }
+
+    sdtx_color3b(0xAF, 0xAF, 0xAF);
+    sdtx_putc(CURSOR_CHAR);
 
     // Render pass
     sg_begin_pass(&(sg_pass){
@@ -305,35 +319,119 @@ static void cleanup()
     sg_shutdown();
 }
 
+void rescale_terminal()
+{
+    state.size = (JTermSize){
+        .w = sapp_width()/(CHAR_PIXELS*state.scale),
+        .h = sapp_height()/(CHAR_PIXELS*state.scale),
+    };
+}
+
 static void event(const sapp_event *event)
 {
-    char buf[1];
-    bool should_write = false;
+    char c[4] = { 0 };
     switch (event->type) {
         case SAPP_EVENTTYPE_KEY_DOWN: {
             if (event->key_code == SAPP_KEYCODE_ESCAPE) {
                 sapp_quit();
             }
 
+            // ctrl codes
+            #define MIN_SCALE 0.25f
+            #define MAX_SCALE 10.0f
+            if (event->modifiers & SAPP_MODIFIER_CTRL) {
+                switch (event->key_code) {
+                    case SAPP_KEYCODE_EQUAL:
+                        if (state.scale < MAX_SCALE)
+                            state.scale += 0.2;
+                    break;
+                    case SAPP_KEYCODE_MINUS:
+                        if (state.scale > MIN_SCALE)
+                            state.scale -= 0.2;
+                    break;
+
+                    case SAPP_KEYCODE_A: c[0] = 0x1;
+                    break;
+                    case SAPP_KEYCODE_B: c[0] = 0x2;
+                    break;
+                    case SAPP_KEYCODE_C: c[0] = 0x3;
+                    break;
+                    case SAPP_KEYCODE_D: c[0] = 0x4;
+                    break;
+                    case SAPP_KEYCODE_E: c[0] = 0x5;
+                    break;
+                    case SAPP_KEYCODE_F: c[0] = 0x6;
+                    break;
+                    case SAPP_KEYCODE_N: c[0] = 0xE;
+                    break;
+                    case SAPP_KEYCODE_P: c[0] = 0x10;
+                    break;
+                    case SAPP_KEYCODE_R: c[0] = 0x12;
+                    break;
+                    case SAPP_KEYCODE_U: c[0] = 0x15;
+                    break;
+                    default:
+                }
+
+                if (*c) write(state.pty.master, c, 1);
+                return;
+            }
+
+            // Sending escape codes
             switch (event->key_code) {
                 case SAPP_KEYCODE_BACKSPACE:
+                    c[0] = '\b';
+                    write(state.pty.master, c, 1);
+                break;
+                case SAPP_KEYCODE_TAB:
+                    c[0] = '\t';
+                    write(state.pty.master, c, 1);
                 break;
                 case SAPP_KEYCODE_ENTER:
-                    buf[0] = '\n';
-                    should_write = true;
+                    c[0] = '\n';
+                    write(state.pty.master, c, 1);
+                break;
+                case SAPP_KEYCODE_UP: {
+                    char *seq = "\x1b[A";
+                    write(state.pty.master, seq, 4);
+                }
+                break;
+                case SAPP_KEYCODE_DOWN: {
+                    char *seq = "\x1b[B";
+                    write(state.pty.master, seq, 4);
+                }
+                break;
+                case SAPP_KEYCODE_RIGHT: {
+                    char *seq = "\x1b[C";
+                    write(state.pty.master, seq, 4);
+                }
+                break;
+                case SAPP_KEYCODE_LEFT: {
+                    char *seq = "\x1b[D";
+                    write(state.pty.master, seq, 4);
+                }
                 break;
                 default: // Nothing
             }
         }
         break;
         case SAPP_EVENTTYPE_CHAR:
-            buf[0] = event->char_code;
-            should_write = true;
+            if (!(event->modifiers & SAPP_MODIFIER_CTRL)) {
+                c[0] = event->char_code;
+                write(state.pty.master, c, 1);
+            }
         break;
+
+        case SAPP_EVENTTYPE_MOUSE_SCROLL:
+            if (event->scroll_y > 0.0f) {
+                state.font = (state.font + 1) % 2;
+            } else {
+                state.font = (state.font - 1) % 2;
+            }
+        break;
+
         default: // Nothing
     }
-
-    if (should_write) write(state.pty.master, buf, 1);
 }
 
 sapp_desc sokol_main(int argc, char *argv[])
