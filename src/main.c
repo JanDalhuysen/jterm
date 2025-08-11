@@ -1,4 +1,5 @@
 #include <stdlib.h>
+#include <ctype.h>
 #include <fcntl.h>
 #include <sys/ioctl.h>
 #include <sys/select.h>
@@ -20,6 +21,7 @@
 #include "ext/sokol_app.h"
 #include "ext/sokol_glue.h"
 #include "ext/sokol_log.h"
+#include "ext/sokol_color.h"
 #include "ext/sokol_debugtext.h"
 //-------------------
 
@@ -57,16 +59,6 @@ typedef struct {
 
 JTermState state;
 
-sg_color sg_make_color_4b(uchar r, uchar g, uchar b, uchar a) {
-    sg_color result;
-    result.r = r / 255.0f;
-    result.g = g / 255.0f;
-    result.b = b / 255.0f;
-    result.a = a / 255.0f;
-    return result;
-}
-
-
 void pt_pair(PTY *pty)
 {
     char *slave_name;
@@ -91,7 +83,7 @@ void pt_pair(PTY *pty)
     /* Up until now, we only have the master FD. We also need a file
      * descriptor for our child process. We get it by asking for the
      * actual path in /dev/pts which we then open using a regular
-     * open(). So, unlike pipe(), you don't get two corresponding file
+     * ope(). So, unlike pipe(), you don't get two corresponding file
      * descriptors in one go. */
     slave_name = ptsname(pty->master);
     if (slave_name == NULL) {
@@ -126,7 +118,6 @@ void term_set_size()
 void spawn_shell(PTY *pty)
 {
     pid_t pid;
-    char *env[] = { "TERM=dumb", "DISPLAY=:1", NULL };
 
     pid = fork();
     if (pid == 0) {
@@ -145,7 +136,8 @@ void spawn_shell(PTY *pty)
         dup2(pty->slave, STDERR_FILENO);
         close(pty->slave);
 
-        execle(SHELL, "-" SHELL, (char *)NULL, env);
+        setenv("TERM", "dumb", 1);
+        execl(SHELL, "-" SHELL, (char *)NULL);
         ERROR("could not execute %s", SHELL);
     } else if (pid > 0) {
         close(pty->slave);
@@ -164,7 +156,7 @@ static void init()
                 .clear_value = sg_make_color_4b(0x18, 0x18, 0x18, 0xFF),
             },
         };
-    state.scale = 1.75f;
+    state.scale = 1.25f;
     state.size = (JTermSize){
         .w = sapp_width()/(CHAR_PIXELS*state.scale),
         .h = sapp_height()/(CHAR_PIXELS*state.scale),
@@ -196,10 +188,10 @@ static void init()
 
 #define POLL_TIMEOUT_MS 10
 #define POLL_TIMEOUT_US (POLL_TIMEOUT_MS*1000)
-#define BUF_SIZE 256
+#define BUF_SIZE 1024
 void read_pty()
 {
-    char buf[256];
+    char buf[BUF_SIZE];
     uint n = 0;
     fd_set readable;
     struct timeval timeout;
@@ -216,7 +208,7 @@ void read_pty()
 
     if (!FD_ISSET(state.pty.master, &readable)) return;
 
-    if ((n = read(state.pty.master, buf, 256)) <= 0) {
+    if ((n = read(state.pty.master, buf, BUF_SIZE)) <= 0) {
         // child exit
         LOG("Nothing to read from child: ");
         perror(NULL);
@@ -265,8 +257,59 @@ void read_pty()
 
 }
 
-void handle_esc_sequence(uint index)
+#define WHITE_COLOR (sg_color){ 0.9f, 0.9f, 0.9f, 1.0f }
+// TODO: More escape sequences
+void handle_esc_sequence(uint *pos)
 {
+    *pos += 1;
+    char c = state.buffer[*pos];
+    if (c != '[') {
+        return;
+    }
+
+    sg_color color = WHITE_COLOR;
+    for (;;) {
+        *pos += 1;
+        c = state.buffer[*pos];
+        if (isdigit(c)) {
+            char *p = &state.buffer[*pos];
+            char *endptr;
+            int digit = strtol(p, &endptr, 0);
+            *pos += endptr - p - 1;
+            switch (digit) {
+                case 0:
+                    // Reset
+                    color = WHITE_COLOR;
+                break;
+                case 30: color = (sg_color)SG_BLACK; break;
+                case 31: color = (sg_color)SG_RED; break;
+                case 32: color = (sg_color)SG_GREEN; break;
+                case 33: color = (sg_color)SG_YELLOW; break;
+                case 34: color = (sg_color)SG_BLUE; break;
+                case 35: color = (sg_color)SG_MAGENTA; break;
+                case 36: color = (sg_color)SG_CYAN; break;
+                case 37: color = (sg_color)WHITE_COLOR; break;
+
+                case 90: color = (sg_color)SG_GRAY; break;
+                case 91: color = (sg_color)SG_PALE_VIOLET_RED; break;
+                case 92: color = (sg_color)SG_LIGHT_GREEN; break;
+                case 93: color = (sg_color)SG_LIGHT_YELLOW; break;
+                case 94: color = (sg_color)SG_LIGHT_BLUE; break;
+                case 95: color = (sg_color)SG_PINK; break;
+                case 96: color = (sg_color)SG_LIGHT_CYAN; break;
+                case 97: color = (sg_color)SG_WHITE; break;
+
+                default:
+            }
+        } else if (c == 'm') {
+            sdtx_color4f(color.r, color.g, color.g, color.a);
+            return;
+        } else if (c == ';') {
+            continue;
+        } else {
+            return;
+        }
+    }
 }
 
 static void frame()
@@ -281,22 +324,21 @@ static void frame()
 
     // all movement is relative to this origin and is all in character units
     sdtx_origin(0, 0);
-    sdtx_color3b(0xFF, 0xFF, 0xFF);
+    sdtx_color4f(WHITE_COLOR.r, WHITE_COLOR.g, WHITE_COLOR.b, WHITE_COLOR.a);
     sdtx_font(state.font);
 
     // render the buffer character by character to handle escape sequences
-    for (int row = 0; row <= state.pos.y; row++) {
-        for (int col = 0; col < state.size.w; col++) {
-            char c = state.buffer[row*state.size.w + col];
-            if (!c) break;
-            // When we find esc the upcoming sequence must be handled
-            uint index = row*state.size.w + col;
-            if (c == '\x1b') handle_esc_sequence(index + 1);
-            sdtx_putc(c);
-        }
-        if (row < state.pos.y) {
+    for (uint i = 0; i <= state.pos.y*state.size.w + state.pos.x; i++) {
+        if (i % state.size.w == 0) {
             sdtx_crlf();
         }
+        char c = state.buffer[i];
+        if (!c) continue;
+        // When we find esc the upcoming sequence must be handled
+        if (c == '\x1b') {
+            handle_esc_sequence(&i);
+        }
+        sdtx_putc(c);
     }
 
     sdtx_color3b(0xAF, 0xAF, 0xAF);
@@ -319,6 +361,7 @@ static void cleanup()
     sg_shutdown();
 }
 
+// TODO: IMPLEMENT RESIZING PROPERLY
 void rescale_terminal()
 {
     state.size = (JTermSize){
@@ -348,6 +391,11 @@ static void event(const sapp_event *event)
                     case SAPP_KEYCODE_MINUS:
                         if (state.scale > MIN_SCALE)
                             state.scale -= 0.2;
+                    break;
+                    case SAPP_KEYCODE_L: 
+                        memset(state.buffer, 0, state.pos.y*state.size.w +
+                               state.pos.x);
+                        state.pos = (JTermPos){ 0 };
                     break;
 
                     case SAPP_KEYCODE_A: c[0] = 0x1;
@@ -429,6 +477,7 @@ static void event(const sapp_event *event)
                 state.font = (state.font - 1) % 2;
             }
         break;
+
 
         default: // Nothing
     }
