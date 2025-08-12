@@ -25,8 +25,8 @@
 #include "ext/sokol_debugtext.h"
 //-------------------
 
-#define WINDOW_WIDTH 800
-#define WINDOW_HEIGHT 600
+#define WINDOW_WIDTH 960
+#define WINDOW_HEIGHT 720
 
 #define CHAR_PIXELS 8
 #define CURSOR_CHAR 0x7c
@@ -218,6 +218,7 @@ void read_pty()
     for (int i = 0; i < n; i++) {
         switch (buf[i]) {
             case '\r':
+                state.buffer[state.pos.y*state.size.w + state.pos.x] = '\r';
                 state.pos.x = 0;
             break;
             case '\n':
@@ -225,6 +226,7 @@ void read_pty()
                     /* We read a newline and if we did *not* implicitly
                      * wrap to the next line */
                     state.pos.y++;
+                    state.buffer[state.pos.y*state.size.w + state.pos.x] = '\n';
                     state.just_wrapped = false;
                 }
             break;
@@ -268,6 +270,7 @@ void handle_esc_sequence(uint *pos)
     }
 
     sg_color color = WHITE_COLOR;
+    int values[4] = { 0 }, value_count = 0;
     for (;;) {
         *pos += 1;
         c = state.buffer[*pos];
@@ -275,6 +278,7 @@ void handle_esc_sequence(uint *pos)
             char *p = &state.buffer[*pos];
             char *endptr;
             int digit = strtol(p, &endptr, 0);
+            values[value_count++] = digit;
             *pos += endptr - p - 1;
             switch (digit) {
                 case 0:
@@ -301,13 +305,68 @@ void handle_esc_sequence(uint *pos)
 
                 default:
             }
-        } else if (c == 'm') {
-            sdtx_color4f(color.r, color.g, color.g, color.a);
-            return;
-        } else if (c == ';') {
-            continue;
         } else {
-            return;
+            JTermPos cpos = { *pos / state.size.w, *pos % state.size.w };
+            switch (c) {
+                case ';': continue;
+                case 'm':
+                    sdtx_color4f(color.r, color.g, color.g, color.a);
+                    return;
+
+                case 'A': {
+                    int n = values[0] ? values[0] : 1;
+                    n = MIN(n, cpos.y);
+                    sdtx_move_y(-n);
+                    return;
+                }
+                case 'B': {
+                    int n = values[0] ? values[0] : 1;
+                    n = MIN(n, state.size.h - cpos.y);
+                    sdtx_move_y(n);
+                    return;
+                }
+                case 'C': {
+                    int n = values[0] ? values[0] : 1;
+                    n = MIN(n, state.size.w - cpos.x);
+                    sdtx_move_x(n);
+                    return;
+                }
+                case 'D': {
+                    int n = values[0] ? values[0] : 1;
+                    n = MIN(n, cpos.x);
+                    sdtx_move_x(-n);
+                    return;
+                }
+                case 'E':
+                    if (values[0]) sdtx_move_y(values[0]);
+                    else sdtx_move_y(1);
+                    return;
+                case 'F':
+                    if (values[0]) sdtx_move_y(-values[0]);
+                    else sdtx_move_y(-1);
+                    return;
+                case 'G':
+                    if (values[0]) sdtx_pos_x(values[0]);
+                    else sdtx_pos_x(1);
+                    return;
+                case 'H':
+                    if (values[0]) sdtx_pos_y(values[0]);
+                    else sdtx_pos_y(1);
+                    if (values[1]) sdtx_pos_x(values[1]);
+                    else sdtx_pos_x(1);
+                    return;
+                case 'J': {
+                    return;
+                }
+                case 'K': {
+                    return;
+                }
+                case '?':
+                    *pos += 2;
+                return;
+
+                default: return;
+            }
         }
     }
 }
@@ -329,16 +388,18 @@ static void frame()
 
     // render the buffer character by character to handle escape sequences
     for (uint i = 0; i <= state.pos.y*state.size.w + state.pos.x; i++) {
-        if (i % state.size.w == 0) {
-            sdtx_crlf();
-        }
         char c = state.buffer[i];
         if (!c) continue;
+        if (i % state.size.w == 0 || c == '\n') {
+            sdtx_crlf();
+        } else if (c == '\r') {
+            sdtx_pos_x(1);
+        }
+
         // When we find esc the upcoming sequence must be handled
         if (c == '\x1b') {
             handle_esc_sequence(&i);
-        }
-        sdtx_putc(c);
+        } else sdtx_putc(c);
     }
 
     sdtx_color3b(0xAF, 0xAF, 0xAF);
@@ -361,13 +422,21 @@ static void cleanup()
     sg_shutdown();
 }
 
-// TODO: IMPLEMENT RESIZING PROPERLY
 void rescale_terminal()
 {
+    JTermSize old_size = state.size;
     state.size = (JTermSize){
         .w = sapp_width()/(CHAR_PIXELS*state.scale),
         .h = sapp_height()/(CHAR_PIXELS*state.scale),
     };
+    if (state.size.w*state.size.h > old_size.w*old_size.h) {
+        state.buffer = realloc(state.buffer, state.size.w*state.size.h);
+
+        uint empty_bytes = state.size.w*state.size.h - old_size.w*old_size.h;
+
+        memset(&state.buffer[old_size.w*old_size.h], 0, empty_bytes);
+        // TODO: copy everything over
+    } 
 }
 
 static void event(const sapp_event *event)
@@ -385,12 +454,16 @@ static void event(const sapp_event *event)
             if (event->modifiers & SAPP_MODIFIER_CTRL) {
                 switch (event->key_code) {
                     case SAPP_KEYCODE_EQUAL:
-                        if (state.scale < MAX_SCALE)
+                        if (state.scale < MAX_SCALE) {
                             state.scale += 0.2;
+                            rescale_terminal();
+                        }
                     break;
                     case SAPP_KEYCODE_MINUS:
-                        if (state.scale > MIN_SCALE)
+                        if (state.scale > MIN_SCALE) {
                             state.scale -= 0.2;
+                            rescale_terminal();
+                        }
                     break;
                     case SAPP_KEYCODE_L: 
                         memset(state.buffer, 0, state.pos.y*state.size.w +
@@ -440,23 +513,23 @@ static void event(const sapp_event *event)
                     write(state.pty.master, c, 1);
                 break;
                 case SAPP_KEYCODE_UP: {
-                    char *seq = "\x1b[A";
-                    write(state.pty.master, seq, 4);
+                    char seq[] = "\x1b[A";
+                    write(state.pty.master, seq, 3);
                 }
                 break;
                 case SAPP_KEYCODE_DOWN: {
-                    char *seq = "\x1b[B";
-                    write(state.pty.master, seq, 4);
+                    char seq[] = "\x1b[B";
+                    write(state.pty.master, seq, 3);
                 }
                 break;
                 case SAPP_KEYCODE_RIGHT: {
-                    char *seq = "\x1b[C";
-                    write(state.pty.master, seq, 4);
+                    char seq[] = "\x1b[C";
+                    write(state.pty.master, seq, 3);
                 }
                 break;
                 case SAPP_KEYCODE_LEFT: {
-                    char *seq = "\x1b[D";
-                    write(state.pty.master, seq, 4);
+                    char seq[] = "\x1b[D";
+                    write(state.pty.master, seq, 3);
                 }
                 break;
                 default: // Nothing
