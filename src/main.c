@@ -1,6 +1,6 @@
-#include <stdlib.h>
 #include <ctype.h>
 #include <fcntl.h>
+#include <stdlib.h>
 #include <sys/ioctl.h>
 #include <sys/select.h>
 #include <sys/stat.h>
@@ -19,10 +19,10 @@
 #endif
 #include "ext/sokol_gfx.h"
 #include "ext/sokol_app.h"
-#include "ext/sokol_glue.h"
-#include "ext/sokol_log.h"
 #include "ext/sokol_color.h"
 #include "ext/sokol_debugtext.h"
+#include "ext/sokol_glue.h"
+#include "ext/sokol_log.h"
 //-------------------
 
 #define WINDOW_WIDTH 960
@@ -59,11 +59,10 @@ typedef struct {
 
 JTermState state;
 
-void pt_pair(PTY *pty)
-{
+void pt_pair(PTY *pty) {
     char *slave_name;
 
-    // Opens the PTY master device. 
+    // Opens the PTY master device.
     pty->master = posix_openpt(O_RDWR | O_NOCTTY);
     if (pty->master == -1) {
         ERROR("posix_openpt");
@@ -71,8 +70,7 @@ void pt_pair(PTY *pty)
     /* grantpt() and unlockpt() are housekeeping functions that have to
      * be called before we can open the slave FD. Refer to the manpages
      * on what they do. */
-    if (grantpt(pty->master) == -1)
-    {
+    if (grantpt(pty->master) == -1) {
         perror("grantpt");
     }
 
@@ -96,8 +94,7 @@ void pt_pair(PTY *pty)
     }
 }
 
-void term_set_size()
-{
+void term_set_size() {
     struct winsize ws = {
         .ws_col = state.size.w,
         .ws_row = state.size.h,
@@ -115,8 +112,7 @@ void term_set_size()
     }
 }
 
-void spawn_shell(PTY *pty)
-{
+void spawn_shell(PTY *pty) {
     pid_t pid;
 
     pid = fork();
@@ -147,22 +143,22 @@ void spawn_shell(PTY *pty)
     ERROR("fork");
 }
 
-static void init()
-{
+static void init() {
     // Global State
     state.pass_action = (sg_pass_action){
-            .colors[0] = {
+        .colors[0] =
+            {
                 .load_action = SG_LOADACTION_CLEAR,
                 .clear_value = sg_make_color_4b(0x18, 0x18, 0x18, 0xFF),
             },
-        };
+    };
     state.scale = 1.25f;
     state.size = (JTermSize){
-        .w = sapp_width()/(CHAR_PIXELS*state.scale),
-        .h = sapp_height()/(CHAR_PIXELS*state.scale),
+        .w = sapp_width() / (CHAR_PIXELS * state.scale),
+        .h = sapp_height() / (CHAR_PIXELS * state.scale),
     };
-    state.pos  = (JTermPos){ 0, 0 };
-    state.buffer = calloc(state.size.h*state.size.w + 1, sizeof(char));
+    state.pos = (JTermPos){0, 0};
+    state.buffer = calloc(state.size.h * state.size.w + 1, sizeof(char));
 
     pt_pair(&state.pty);
     spawn_shell(&state.pty);
@@ -175,22 +171,21 @@ static void init()
     });
 
     sdtx_setup(&(sdtx_desc_t){
-        .fonts = {
-            sdtx_font_cpc(),
-            sdtx_font_oric(),
-        },
+        .fonts =
+            {
+                sdtx_font_cpc(),
+                sdtx_font_oric(),
+            },
         .logger.func = slog_func,
     });
 
     state.font = 0;
-
 }
 
 #define POLL_TIMEOUT_MS 10
-#define POLL_TIMEOUT_US (POLL_TIMEOUT_MS*1000)
+#define POLL_TIMEOUT_US (POLL_TIMEOUT_MS * 1000)
 #define BUF_SIZE 1024
-void read_pty()
-{
+void read_pty() {
     char buf[BUF_SIZE];
     uint n = 0;
     fd_set readable;
@@ -206,7 +201,8 @@ void read_pty()
         ERROR("select");
     }
 
-    if (!FD_ISSET(state.pty.master, &readable)) return;
+    if (!FD_ISSET(state.pty.master, &readable))
+        return;
 
     if ((n = read(state.pty.master, buf, BUF_SIZE)) <= 0) {
         // child exit
@@ -217,52 +213,53 @@ void read_pty()
 
     for (int i = 0; i < n; i++) {
         switch (buf[i]) {
-            case '\r':
-                state.buffer[state.pos.y*state.size.w + state.pos.x] = '\r';
+        case '\r':
+            state.buffer[state.pos.y * state.size.w + state.pos.x] = '\r';
+            state.pos.x = 0;
+            break;
+        case '\n':
+            if (!state.just_wrapped) {
+                /* We read a newline and if we did *not* implicitly
+                 * wrap to the next line */
+                state.pos.y++;
+                state.buffer[state.pos.y * state.size.w + state.pos.x] = '\n';
+                state.just_wrapped = false;
+            }
+            break;
+        case '\b':
+        case 0x7F:
+            state.pos.x--;
+            state.buffer[state.pos.y * state.size.w + state.pos.x] = '\0';
+            break;
+        default:
+            /* If this is a regular byte, store it and advance
+             * the cursor one cell to the right. */
+            state.buffer[state.pos.y * state.size.w + state.pos.x] = buf[i];
+            state.pos.x++;
+            if (state.pos.x >= state.size.w) {
                 state.pos.x = 0;
-            break;
-            case '\n':
-                if (!state.just_wrapped) {
-                    /* We read a newline and if we did *not* implicitly
-                     * wrap to the next line */
-                    state.pos.y++;
-                    state.buffer[state.pos.y*state.size.w + state.pos.x] = '\n';
-                    state.just_wrapped = false;
-                }
-            break;
-            case '\b':
-            case 0x7F:
-                state.pos.x--;
-                state.buffer[state.pos.y*state.size.w + state.pos.x] = '\0';
-            break;
-            default:
-                /* If this is a regular byte, store it and advance
-                 * the cursor one cell to the right. */
-                state.buffer[state.pos.y*state.size.w + state.pos.x] = buf[i];
-                state.pos.x++;
-                if (state.pos.x >= state.size.w) {
-                    state.pos.x = 0;
-                    state.pos.y++;
-                    state.just_wrapped = true;
-                } else state.just_wrapped = false;
+                state.pos.y++;
+                state.just_wrapped = true;
+            } else
+                state.just_wrapped = false;
         }
-        // Shift the entire content one line up and then stay in the very last line.
+
+        // Shift the entire content one line up and then stay in the very last
+        // line.
         if (state.pos.y >= state.size.h) {
             memmove(state.buffer, &state.buffer[state.size.w],
-                    state.size.w*(state.size.h - 1));
+                    state.size.w * (state.size.h - 1));
 
             state.pos.y = state.size.h - 1;
             for (int i = 0; i < state.size.w; i++)
-                state.buffer[state.pos.y*state.size.w + i] = 0;
+                state.buffer[state.pos.y * state.size.w + i] = 0;
         }
     }
-
 }
 
-#define WHITE_COLOR (sg_color){ 0.9f, 0.9f, 0.9f, 1.0f }
+#define WHITE_COLOR (sg_color){0.9f, 0.9f, 0.9f, 1.0f}
 // TODO: More escape sequences
-void handle_esc_sequence(uint *pos)
-{
+void handle_esc_sequence(uint *pos) {
     *pos += 1;
     char c = state.buffer[*pos];
     if (c != '[') {
@@ -270,7 +267,7 @@ void handle_esc_sequence(uint *pos)
     }
 
     sg_color color = WHITE_COLOR;
-    int values[4] = { 0 }, value_count = 0;
+    int values[4] = {0}, value_count = 0;
     for (;;) {
         *pos += 1;
         c = state.buffer[*pos];
@@ -281,105 +278,148 @@ void handle_esc_sequence(uint *pos)
             values[value_count++] = digit;
             *pos += endptr - p - 1;
             switch (digit) {
-                case 0:
-                    // Reset
-                    color = WHITE_COLOR;
+            case 0:
+                // Reset
+                color = WHITE_COLOR;
                 break;
-                case 30: color = (sg_color)SG_BLACK; break;
-                case 31: color = (sg_color)SG_RED; break;
-                case 32: color = (sg_color)SG_GREEN; break;
-                case 33: color = (sg_color)SG_YELLOW; break;
-                case 34: color = (sg_color)SG_BLUE; break;
-                case 35: color = (sg_color)SG_MAGENTA; break;
-                case 36: color = (sg_color)SG_CYAN; break;
-                case 37: color = (sg_color)WHITE_COLOR; break;
+            case 30:
+                color = (sg_color)SG_BLACK;
+                break;
+            case 31:
+                color = (sg_color)SG_RED;
+                break;
+            case 32:
+                color = (sg_color)SG_GREEN;
+                break;
+            case 33:
+                color = (sg_color)SG_YELLOW;
+                break;
+            case 34:
+                color = (sg_color)SG_BLUE;
+                break;
+            case 35:
+                color = (sg_color)SG_MAGENTA;
+                break;
+            case 36:
+                color = (sg_color)SG_CYAN;
+                break;
+            case 37:
+                color = (sg_color)WHITE_COLOR;
+                break;
 
-                case 90: color = (sg_color)SG_GRAY; break;
-                case 91: color = (sg_color)SG_PALE_VIOLET_RED; break;
-                case 92: color = (sg_color)SG_LIGHT_GREEN; break;
-                case 93: color = (sg_color)SG_LIGHT_YELLOW; break;
-                case 94: color = (sg_color)SG_LIGHT_BLUE; break;
-                case 95: color = (sg_color)SG_PINK; break;
-                case 96: color = (sg_color)SG_LIGHT_CYAN; break;
-                case 97: color = (sg_color)SG_WHITE; break;
+            case 90:
+                color = (sg_color)SG_GRAY;
+                break;
+            case 91:
+                color = (sg_color)SG_PALE_VIOLET_RED;
+                break;
+            case 92:
+                color = (sg_color)SG_LIGHT_GREEN;
+                break;
+            case 93:
+                color = (sg_color)SG_LIGHT_YELLOW;
+                break;
+            case 94:
+                color = (sg_color)SG_LIGHT_BLUE;
+                break;
+            case 95:
+                color = (sg_color)SG_PINK;
+                break;
+            case 96:
+                color = (sg_color)SG_LIGHT_CYAN;
+                break;
+            case 97:
+                color = (sg_color)SG_WHITE;
+                break;
 
-                default:
+            default:
             }
         } else {
-            JTermPos cpos = { *pos / state.size.w, *pos % state.size.w };
+            JTermPos cpos = {*pos / state.size.w, *pos % state.size.w};
             switch (c) {
-                case ';': continue;
-                case 'm':
-                    sdtx_color4f(color.r, color.g, color.g, color.a);
-                    return;
-
-                case 'A': {
-                    int n = values[0] ? values[0] : 1;
-                    n = MIN(n, cpos.y);
-                    sdtx_move_y(-n);
-                    return;
-                }
-                case 'B': {
-                    int n = values[0] ? values[0] : 1;
-                    n = MIN(n, state.size.h - cpos.y);
-                    sdtx_move_y(n);
-                    return;
-                }
-                case 'C': {
-                    int n = values[0] ? values[0] : 1;
-                    n = MIN(n, state.size.w - cpos.x);
-                    sdtx_move_x(n);
-                    return;
-                }
-                case 'D': {
-                    int n = values[0] ? values[0] : 1;
-                    n = MIN(n, cpos.x);
-                    sdtx_move_x(-n);
-                    return;
-                }
-                case 'E':
-                    if (values[0]) sdtx_move_y(values[0]);
-                    else sdtx_move_y(1);
-                    return;
-                case 'F':
-                    if (values[0]) sdtx_move_y(-values[0]);
-                    else sdtx_move_y(-1);
-                    return;
-                case 'G':
-                    if (values[0]) sdtx_pos_x(values[0]);
-                    else sdtx_pos_x(1);
-                    return;
-                case 'H':
-                    if (values[0]) sdtx_pos_y(values[0]);
-                    else sdtx_pos_y(1);
-                    if (values[1]) sdtx_pos_x(values[1]);
-                    else sdtx_pos_x(1);
-                    return;
-                case 'J': {
-                    return;
-                }
-                case 'K': {
-                    return;
-                }
-                case '?':
-                    *pos += 2;
+            case ';':
+                continue;
+            case 'm':
+                sdtx_color4f(color.r, color.g, color.g, color.a);
                 return;
 
-                default: return;
+            case 'A': {
+                int n = values[0] ? values[0] : 1;
+                n = MIN(n, cpos.y);
+                sdtx_move_y(-n);
+                return;
+            }
+            case 'B': {
+                int n = values[0] ? values[0] : 1;
+                n = MIN(n, state.size.h - cpos.y);
+                sdtx_move_y(n);
+                return;
+            }
+            case 'C': {
+                int n = values[0] ? values[0] : 1;
+                n = MIN(n, state.size.w - cpos.x);
+                sdtx_move_x(n);
+                return;
+            }
+            case 'D': {
+                int n = values[0] ? values[0] : 1;
+                n = MIN(n, cpos.x);
+                sdtx_move_x(-n);
+                return;
+            }
+            case 'E':
+                if (values[0])
+                    sdtx_move_y(values[0]);
+                else
+                    sdtx_move_y(1);
+                return;
+            case 'F':
+                if (values[0])
+                    sdtx_move_y(-values[0]);
+                else
+                    sdtx_move_y(-1);
+                return;
+            case 'G':
+                if (values[0])
+                    sdtx_pos_x(values[0]);
+                else
+                    sdtx_pos_x(1);
+                return;
+            case 'H':
+                if (values[0])
+                    sdtx_pos_y(values[0]);
+                else
+                    sdtx_pos_y(1);
+                if (values[1])
+                    sdtx_pos_x(values[1]);
+                else
+                    sdtx_pos_x(1);
+                return;
+            case 'J': {
+                return;
+            }
+            case 'K': {
+                return;
+            }
+            case '?':
+                *pos += 2;
+                return;
+
+            default:
+                return;
             }
         }
     }
 }
 
-static void frame()
-{
+static void frame() {
 
     read_pty();
 
     //---Text---
     // characters are all 8x8 pixels on the virtual canvas
     // so we set set lower canvas resolution for increased text size
-    sdtx_canvas(sapp_widthf()/state.scale, sapp_heightf()/state.scale);
+    sdtx_canvas(sapp_widthf() / state.scale, sapp_heightf() / state.scale);
 
     // all movement is relative to this origin and is all in character units
     sdtx_origin(0, 0);
@@ -387,9 +427,10 @@ static void frame()
     sdtx_font(state.font);
 
     // render the buffer character by character to handle escape sequences
-    for (uint i = 0; i <= state.pos.y*state.size.w + state.pos.x; i++) {
+    for (uint i = 0; i <= state.pos.y * state.size.w + state.pos.x; i++) {
         char c = state.buffer[i];
-        if (!c) continue;
+        if (!c)
+            continue;
         if (i % state.size.w == 0 || c == '\n') {
             sdtx_crlf();
         } else if (c == '\r') {
@@ -399,7 +440,8 @@ static void frame()
         // When we find esc the upcoming sequence must be handled
         if (c == '\x1b') {
             handle_esc_sequence(&i);
-        } else sdtx_putc(c);
+        } else
+            sdtx_putc(c);
     }
 
     sdtx_color3b(0xAF, 0xAF, 0xAF);
@@ -407,7 +449,7 @@ static void frame()
 
     // Render pass
     sg_begin_pass(&(sg_pass){
-        .action    = state.pass_action,
+        .action = state.pass_action,
         .swapchain = sglue_swapchain(),
     });
     sdtx_draw();
@@ -416,160 +458,164 @@ static void frame()
     sg_commit();
 }
 
-static void cleanup()
-{
+static void cleanup() {
     sdtx_shutdown();
     sg_shutdown();
 }
 
-void rescale_terminal()
-{
+void rescale_terminal() {
     JTermSize old_size = state.size;
     state.size = (JTermSize){
-        .w = sapp_width()/(CHAR_PIXELS*state.scale),
-        .h = sapp_height()/(CHAR_PIXELS*state.scale),
+        .w = sapp_width() / (CHAR_PIXELS * state.scale),
+        .h = sapp_height() / (CHAR_PIXELS * state.scale),
     };
-    if (state.size.w*state.size.h > old_size.w*old_size.h) {
-        state.buffer = realloc(state.buffer, state.size.w*state.size.h);
+    if (state.size.w * state.size.h > old_size.w * old_size.h) {
+        state.buffer = realloc(state.buffer, state.size.w * state.size.h);
 
-        uint empty_bytes = state.size.w*state.size.h - old_size.w*old_size.h;
+        uint empty_bytes =
+            state.size.w * state.size.h - old_size.w * old_size.h;
 
-        memset(&state.buffer[old_size.w*old_size.h], 0, empty_bytes);
+        memset(&state.buffer[old_size.w * old_size.h], 0, empty_bytes);
         // TODO: copy everything over
-    } 
-}
-
-static void event(const sapp_event *event)
-{
-    char c[4] = { 0 };
-    switch (event->type) {
-        case SAPP_EVENTTYPE_KEY_DOWN: {
-            if (event->key_code == SAPP_KEYCODE_ESCAPE) {
-                sapp_quit();
-            }
-
-            // ctrl codes
-            #define MIN_SCALE 0.25f
-            #define MAX_SCALE 10.0f
-            if (event->modifiers & SAPP_MODIFIER_CTRL) {
-                switch (event->key_code) {
-                    case SAPP_KEYCODE_EQUAL:
-                        if (state.scale < MAX_SCALE) {
-                            state.scale += 0.2;
-                            rescale_terminal();
-                        }
-                    break;
-                    case SAPP_KEYCODE_MINUS:
-                        if (state.scale > MIN_SCALE) {
-                            state.scale -= 0.2;
-                            rescale_terminal();
-                        }
-                    break;
-                    case SAPP_KEYCODE_L: 
-                        memset(state.buffer, 0, state.pos.y*state.size.w +
-                               state.pos.x);
-                        state.pos = (JTermPos){ 0 };
-                    break;
-
-                    case SAPP_KEYCODE_A: c[0] = 0x1;
-                    break;
-                    case SAPP_KEYCODE_B: c[0] = 0x2;
-                    break;
-                    case SAPP_KEYCODE_C: c[0] = 0x3;
-                    break;
-                    case SAPP_KEYCODE_D: c[0] = 0x4;
-                    break;
-                    case SAPP_KEYCODE_E: c[0] = 0x5;
-                    break;
-                    case SAPP_KEYCODE_F: c[0] = 0x6;
-                    break;
-                    case SAPP_KEYCODE_N: c[0] = 0xE;
-                    break;
-                    case SAPP_KEYCODE_P: c[0] = 0x10;
-                    break;
-                    case SAPP_KEYCODE_R: c[0] = 0x12;
-                    break;
-                    case SAPP_KEYCODE_U: c[0] = 0x15;
-                    break;
-                    default:
-                }
-
-                if (*c) write(state.pty.master, c, 1);
-                return;
-            }
-
-            // Sending escape codes
-            switch (event->key_code) {
-                case SAPP_KEYCODE_BACKSPACE:
-                    c[0] = '\b';
-                    write(state.pty.master, c, 1);
-                break;
-                case SAPP_KEYCODE_TAB:
-                    c[0] = '\t';
-                    write(state.pty.master, c, 1);
-                break;
-                case SAPP_KEYCODE_ENTER:
-                    c[0] = '\n';
-                    write(state.pty.master, c, 1);
-                break;
-                case SAPP_KEYCODE_UP: {
-                    char seq[] = "\x1b[A";
-                    write(state.pty.master, seq, 3);
-                }
-                break;
-                case SAPP_KEYCODE_DOWN: {
-                    char seq[] = "\x1b[B";
-                    write(state.pty.master, seq, 3);
-                }
-                break;
-                case SAPP_KEYCODE_RIGHT: {
-                    char seq[] = "\x1b[C";
-                    write(state.pty.master, seq, 3);
-                }
-                break;
-                case SAPP_KEYCODE_LEFT: {
-                    char seq[] = "\x1b[D";
-                    write(state.pty.master, seq, 3);
-                }
-                break;
-                default: // Nothing
-            }
-        }
-        break;
-        case SAPP_EVENTTYPE_CHAR:
-            if (!(event->modifiers & SAPP_MODIFIER_CTRL)) {
-                c[0] = event->char_code;
-                write(state.pty.master, c, 1);
-            }
-        break;
-
-        case SAPP_EVENTTYPE_MOUSE_SCROLL:
-            if (event->scroll_y > 0.0f) {
-                state.font = (state.font + 1) % 2;
-            } else {
-                state.font = (state.font - 1) % 2;
-            }
-        break;
-
-
-        default: // Nothing
     }
 }
 
-sapp_desc sokol_main(int argc, char *argv[])
-{
+static void event(const sapp_event *event) {
+    char c[4] = {0};
+    switch (event->type) {
+    case SAPP_EVENTTYPE_KEY_DOWN: {
+        if (event->key_code == SAPP_KEYCODE_ESCAPE) {
+            sapp_quit();
+        }
+
+// ctrl codes
+#define MIN_SCALE 0.25f
+#define MAX_SCALE 10.0f
+        if (event->modifiers & SAPP_MODIFIER_CTRL) {
+            switch (event->key_code) {
+            case SAPP_KEYCODE_EQUAL:
+                if (state.scale < MAX_SCALE) {
+                    state.scale += 0.2;
+                    rescale_terminal();
+                }
+                break;
+            case SAPP_KEYCODE_MINUS:
+                if (state.scale > MIN_SCALE) {
+                    state.scale -= 0.2;
+                    rescale_terminal();
+                }
+                break;
+            case SAPP_KEYCODE_L:
+                memset(state.buffer, 0,
+                       state.pos.y * state.size.w + state.pos.x);
+                state.pos = (JTermPos){0};
+                break;
+
+            case SAPP_KEYCODE_A:
+                c[0] = 0x1;
+                break;
+            case SAPP_KEYCODE_B:
+                c[0] = 0x2;
+                break;
+            case SAPP_KEYCODE_C:
+                c[0] = 0x3;
+                break;
+            case SAPP_KEYCODE_D:
+                c[0] = 0x4;
+                break;
+            case SAPP_KEYCODE_E:
+                c[0] = 0x5;
+                break;
+            case SAPP_KEYCODE_F:
+                c[0] = 0x6;
+                break;
+            case SAPP_KEYCODE_N:
+                c[0] = 0xE;
+                break;
+            case SAPP_KEYCODE_P:
+                c[0] = 0x10;
+                break;
+            case SAPP_KEYCODE_R:
+                c[0] = 0x12;
+                break;
+            case SAPP_KEYCODE_U:
+                c[0] = 0x15;
+                break;
+            default:
+            }
+
+            if (*c)
+                write(state.pty.master, c, 1);
+            return;
+        }
+
+        // Sending escape codes
+#ifndef __APPLE__
+        switch (event->key_code) {
+        case SAPP_KEYCODE_BACKSPACE:
+            c[0] = '\b';
+            write(state.pty.master, c, 1);
+            break;
+        case SAPP_KEYCODE_TAB:
+            c[0] = '\t';
+            write(state.pty.master, c, 1);
+            break;
+        case SAPP_KEYCODE_ENTER:
+            c[0] = '\n';
+            write(state.pty.master, c, 1);
+            break;
+        case SAPP_KEYCODE_UP: {
+            char seq[] = "\x1b[A";
+            write(state.pty.master, seq, 3);
+        } break;
+        case SAPP_KEYCODE_DOWN: {
+            char seq[] = "\x1b[B";
+            write(state.pty.master, seq, 3);
+        } break;
+        case SAPP_KEYCODE_RIGHT: {
+            char seq[] = "\x1b[C";
+            write(state.pty.master, seq, 3);
+        } break;
+        case SAPP_KEYCODE_LEFT: {
+            char seq[] = "\x1b[D";
+            write(state.pty.master, seq, 3);
+        } break;
+        default: // Nothing
+        }
+#endif
+    } break;
+    case SAPP_EVENTTYPE_CHAR:
+        if (!(event->modifiers & SAPP_MODIFIER_CTRL)) {
+            c[0] = event->char_code;
+            write(state.pty.master, c, 1);
+        }
+        break;
+
+    case SAPP_EVENTTYPE_MOUSE_SCROLL:
+        if (event->scroll_y > 0.0f) {
+            state.font = (state.font + 1) % 2;
+        } else {
+            state.font = (state.font - 1) % 2;
+        }
+        break;
+
+    default: // Nothing
+    }
+}
+
+sapp_desc sokol_main(int argc, char *argv[]) {
     (void)argc, (void)argv;
-    return (sapp_desc) {
-        .init_cb            = init,
-        .frame_cb           = frame,
-        .cleanup_cb         = cleanup,
-        .event_cb           = event, 
-        .width              = WINDOW_WIDTH,
-        .height             = WINDOW_HEIGHT,
-        .window_title       = "jterm",
-        .logger.func        = slog_func,
-        .enable_clipboard   = true,
-        .clipboard_size     = 2048,
+    return (sapp_desc){
+        .init_cb = init,
+        .frame_cb = frame,
+        .cleanup_cb = cleanup,
+        .event_cb = event,
+        .width = WINDOW_WIDTH,
+        .height = WINDOW_HEIGHT,
+        .window_title = "jterm",
+        .logger.func = slog_func,
+        .enable_clipboard = true,
+        .clipboard_size = 2048,
         .icon.sokol_default = true,
     };
 }

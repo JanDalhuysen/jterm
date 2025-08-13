@@ -8,8 +8,13 @@ LFLAGS=""
 OS=$(uname)
 if [ $OS = "Linux" ]; then
     LFLAGS="-lX11 -lXi -lXcursor -lGL -ldl -lpthread -lm"
+elif [ $OS = "Darwin" ]; then
+    SRC="src/sokol_mac.m"
+    echo "Building $OS..."
+    LFLAGS="-framework Cocoa -framework QuartzCore -framework Metal -framework MetalKit -lobjc"
 else
     echo "$OS not supported"
+    exit 1
 fi
 
 set -xe
